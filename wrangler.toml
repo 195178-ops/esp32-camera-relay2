@@ -1,5 +1,5 @@
 
-name = "esp32-camera-relay"
+name = "esp32-camera-relay2"
 main = "worker.js"
 compatibility_date = "2026-11-24"
 
@@ -10,3 +10,7 @@ class_name = "CameraRoom"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CameraRoom"]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
