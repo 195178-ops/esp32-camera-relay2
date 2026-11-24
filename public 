@@ -1,0 +1,487 @@
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Camera Studio</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;background:#0b0e14;color:white;
+  font-family:Arial,sans-serif
+}
+header{
+  background:#171c27;padding:20px;text-align:center;
+  border-bottom:1px solid #303747
+}
+header h2{margin:0}
+header p{color:#9ca3af;font-size:12px}
+.container{max-width:850px;margin:auto;padding:14px}
+.panel{
+  background:#171c27;border:1px solid #303747;
+  border-radius:12px;padding:15px;margin-bottom:15px
+}
+input{
+  width:100%;padding:13px;margin:7px 0;
+  border-radius:8px;border:1px solid #475569;
+  background:#0b0e14;color:white
+}
+button{
+  border:0;border-radius:10px;padding:15px;
+  color:white;font-weight:bold;font-size:14px;
+  cursor:pointer;width:100%;margin:5px 0
+}
+.blue{background:#2563eb}
+.red{background:#dc2626}
+.gray{background:#374151}
+.green{background:#15803d}
+.preview{
+  background:#000;border-radius:12px;
+  overflow:hidden;border:1px solid #303747
+}
+#camera{width:100%;display:block;min-height:180px;object-fit:contain}
+.status{padding:12px;color:#aeb8c8;font-size:13px}
+.controls{
+  display:grid;grid-template-columns:1fr 1fr;
+  gap:8px;margin-top:12px
+}
+.info{font-size:13px;line-height:2;color:#cbd5e1}
+#message{color:#22c55e;overflow-wrap:anywhere}
+#canvas{display:none}
+small{color:#94a3b8}
+</style>
+</head>
+
+<body>
+
+<header>
+<h2>ESP32 MOBILE STUDIO</h2>
+<p>REMOTE CAMERA CONTROL</p>
+</header>
+
+<div class="container">
+
+<div class="panel">
+  <h3>اتصال الكاميرا</h3>
+  <label>Viewer Token</label>
+  <input id="viewerToken" type="password"
+  placeholder="أدخل رمز المشاهدة">
+
+  <button class="green" onclick="connectCamera()">
+  CONNECT CAMERA
+  </button>
+</div>
+
+<div class="preview" id="preview">
+  <img id="camera" alt="Camera stream">
+  <div class="status">
+    <span id="cameraStatus">● DISCONNECTED</span>
+    <span id="recordStatus"> | READY</span>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="red" id="recordBtn"
+  onclick="toggleRecording()">● START RECORDING</button>
+
+  <button class="blue" onclick="takePhoto()">📷 TAKE PHOTO</button>
+
+  <button class="gray" onclick="chooseFolder()">📁 CHOOSE FOLDER</button>
+
+  <button class="gray" onclick="fullScreen()">⛶ FULL SCREEN</button>
+</div>
+
+<div class="panel info">
+  <div>CAMERA: ESP32 WROVER KIT</div>
+  <div>RESOLUTION: <span id="resolution">Waiting</span></div>
+  <div>VIDEO: WEBM</div>
+  <div>PHOTO: JPG</div>
+  <div id="timer">TIME: 00:00</div>
+  <div id="message">Studio ready</div>
+  <div id="saveLocation">SAVE: CHROME DOWNLOADS</div>
+</div>
+
+<div class="panel">
+  <h3>تحديث ESP32 عن بُعد</h3>
+
+  <p><small>اختر ملف البرنامج بصيغة BIN</small></p>
+
+  <input type="file" id="firmwareFile" accept=".bin">
+
+  <label>OTA Access Token</label>
+  <input id="otaToken" type="password"
+  placeholder="رمز حماية التحديث">
+
+  <button class="blue" onclick="uploadFirmware()">
+  UPDATE ESP32
+  </button>
+
+  <div id="otaStatus" class="info">
+  لم يتم إرسال أي تحديث
+  </div>
+
+  <small>
+  يتطلب هذا الزر تجهيز خدمة OTA في Cloudflare وبرنامج ESP32.
+  </small>
+</div>
+
+<canvas id="canvas"></canvas>
+
+</div>
+
+<script>
+const img = document.getElementById("camera");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+let ws = null;
+let currentURL = null;
+let recorder = null;
+let recording = false;
+let chunks = [];
+let mediaStream = null;
+let directoryHandle = null;
+let startedAt = 0;
+let timerInterval = null;
+let wakeLock = null;
+
+function message(text){
+  document.getElementById("message").textContent=text;
+}
+
+function fileTime(){
+  return new Date().toISOString().replace(/[:.]/g,"-");
+}
+
+// CAMERA CONNECTION
+function connectCamera(){
+
+  const token=document.getElementById("viewerToken").value.trim();
+
+  if(!token){
+    message("أدخل Viewer Token أولاً");
+    return;
+  }
+
+  if(ws) ws.close();
+
+  const url="wss://"+location.host+
+  "/ws?role=viewer&token="+encodeURIComponent(token);
+
+  ws=new WebSocket(url);
+  ws.binaryType="blob";
+
+  ws.onopen=()=>{
+    document.getElementById("cameraStatus").textContent="● CONNECTED";
+    message("Cloudflare connected");
+  };
+
+  ws.onmessage=(event)=>{
+    if(!(event.data instanceof Blob)) return;
+
+    const newURL=URL.createObjectURL(event.data);
+    const oldURL=currentURL;
+    currentURL=newURL;
+    img.src=newURL;
+
+    if(oldURL){
+      setTimeout(()=>URL.revokeObjectURL(oldURL),3000);
+    }
+  };
+
+  ws.onerror=()=>{
+    message("WebSocket connection error");
+  };
+
+  ws.onclose=()=>{
+    document.getElementById("cameraStatus").textContent="● DISCONNECTED";
+  };
+}
+
+// CAMERA DRAWING FOR RECORDING
+function drawFrame(){
+  if(img.complete && img.naturalWidth>0){
+    if(canvas.width!==img.naturalWidth ||
+       canvas.height!==img.naturalHeight){
+      canvas.width=img.naturalWidth;
+      canvas.height=img.naturalHeight;
+      document.getElementById("resolution").textContent=
+      canvas.width+" x "+canvas.height;
+    }
+    try{
+      ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    }catch(e){}
+  }
+  requestAnimationFrame(drawFrame);
+}
+drawFrame();
+
+// SAVE FILE
+async function saveBlob(blob,filename){
+
+  if(directoryHandle){
+    try{
+      let permission=await directoryHandle.queryPermission({
+        mode:"readwrite"
+      });
+
+      if(permission!=="granted"){
+        permission=await directoryHandle.requestPermission({
+          mode:"readwrite"
+        });
+      }
+
+      if(permission==="granted"){
+        const handle=await directoryHandle.getFileHandle(
+          filename,{create:true}
+        );
+        const writable=await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        message("Saved: "+filename);
+        return;
+      }
+    }catch(e){}
+  }
+
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+  message("Download started: "+filename);
+}
+
+// CHOOSE FOLDER
+async function chooseFolder(){
+
+  if(!window.showDirectoryPicker){
+    message("Folder selection unavailable. Using Downloads.");
+    return;
+  }
+
+  try{
+    directoryHandle=await window.showDirectoryPicker({
+      mode:"readwrite"
+    });
+
+    document.getElementById("saveLocation").textContent=
+    "SAVE: SELECTED FOLDER";
+
+    message("Folder selected");
+  }catch(e){
+    message("Folder selection cancelled");
+  }
+}
+
+// TAKE PHOTO
+async function takePhoto(){
+
+  if(!img.naturalWidth){
+    message("Camera not ready");
+    return;
+  }
+
+  canvas.toBlob(async(blob)=>{
+    if(blob){
+      await saveBlob(blob,"ESP32_Photo_"+fileTime()+".jpg");
+    }else{
+      message("Photo failed");
+    }
+  },"image/jpeg",0.95);
+}
+
+// SCREEN LOCK
+async function keepScreenOn(){
+  try{
+    if("wakeLock" in navigator){
+      wakeLock=await navigator.wakeLock.request("screen");
+    }
+  }catch(e){}
+}
+
+async function releaseScreenLock(){
+  if(wakeLock){
+    await wakeLock.release();
+    wakeLock=null;
+  }
+}
+
+// RECORDING
+function toggleRecording(){
+  if(recording) stopRecording();
+  else startRecording();
+}
+
+async function startRecording(){
+
+  if(!img.naturalWidth){
+    message("Camera not ready");
+    return;
+  }
+
+  if(!window.MediaRecorder || !canvas.captureStream){
+    message("Recording unsupported");
+    return;
+  }
+
+  mediaStream=canvas.captureStream(30);
+
+  let options={};
+
+  if(MediaRecorder.isTypeSupported("video/webm;codecs=vp8")){
+    options.mimeType="video/webm;codecs=vp8";
+  }else if(MediaRecorder.isTypeSupported("video/webm")){
+    options.mimeType="video/webm";
+  }
+
+  try{
+    recorder=new MediaRecorder(mediaStream,options);
+  }catch(e){
+    message("Recorder initialization failed");
+    mediaStream.getTracks().forEach(t=>t.stop());
+    return;
+  }
+
+  chunks=[];
+
+  recorder.ondataavailable=(e)=>{
+    if(e.data && e.data.size>0) chunks.push(e.data);
+  };
+
+  recorder.onstop=async()=>{
+    const blob=new Blob(chunks,{
+      type:recorder.mimeType || "video/webm"
+    });
+
+    if(blob.size>0){
+      await saveBlob(blob,"ESP32_Video_"+fileTime()+".webm");
+    }
+
+    if(mediaStream){
+      mediaStream.getTracks().forEach(t=>t.stop());
+      mediaStream=null;
+    }
+
+    document.getElementById("recordStatus").textContent=" | READY";
+    await releaseScreenLock();
+  };
+
+  recorder.start(1000);
+  recording=true;
+  startedAt=Date.now();
+
+  await keepScreenOn();
+
+  const btn=document.getElementById("recordBtn");
+  btn.textContent="■ STOP RECORDING";
+
+  document.getElementById("recordStatus").textContent=" | RECORDING";
+
+  timerInterval=setInterval(()=>{
+    const seconds=Math.floor((Date.now()-startedAt)/1000);
+    const min=Math.floor(seconds/60);
+    const sec=seconds%60;
+
+    document.getElementById("timer").textContent=
+    "TIME: "+String(min).padStart(2,"0")+":"+
+    String(sec).padStart(2,"0");
+  },500);
+
+  message("Recording started");
+}
+
+function stopRecording(){
+
+  if(!recorder || recorder.state==="inactive") return;
+
+  recording=false;
+  clearInterval(timerInterval);
+
+  document.getElementById("recordBtn").textContent=
+  "● START RECORDING";
+
+  message("Preparing video...");
+  recorder.stop();
+}
+
+// FULL SCREEN
+async function fullScreen(){
+  try{
+    if(!document.fullscreenElement){
+      await document.getElementById("preview").requestFullscreen();
+    }else{
+      await document.exitFullscreen();
+    }
+  }catch(e){
+    message("Fullscreen unavailable");
+  }
+}
+
+// OTA UPLOAD
+async function uploadFirmware(){
+
+  const file=document.getElementById("firmwareFile").files[0];
+  const token=document.getElementById("otaToken").value.trim();
+  const status=document.getElementById("otaStatus");
+
+  if(!file){
+    status.textContent="اختر ملف BIN أولاً";
+    return;
+  }
+
+  if(!file.name.toLowerCase().endsWith(".bin")){
+    status.textContent="الملف يجب أن يكون BIN";
+    return;
+  }
+
+  if(!token){
+    status.textContent="أدخل OTA Access Token";
+    return;
+  }
+
+  status.textContent="جاري إرسال الملف...";
+
+  const formData=new FormData();
+  formData.append("firmware",file,file.name);
+
+  try{
+    const response=await fetch("/api/ota",{
+      method:"POST",
+      headers:{"X-OTA-Token":token},
+      body:formData
+    });
+
+    const result=await response.text();
+
+    if(!response.ok){
+      throw new Error(result || "Upload failed");
+    }
+
+    status.textContent="تم استلام الملف: "+result;
+
+  }catch(error){
+    status.textContent="لم يكتمل الرفع: "+error.message;
+  }
+}
+
+// WAKE LOCK ON RETURN
+document.addEventListener("visibilitychange",async()=>{
+  if(document.visibilityState==="visible" && recording){
+    await keepScreenOn();
+  }
+});
+
+window.addEventListener("beforeunload",()=>{
+  if(ws) ws.close();
+});
+</script>
+
+</body>
+</html>
