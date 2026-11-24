@@ -6,10 +6,8 @@ export class CameraRoom {
   }
 
   async fetch(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("ESP32 Camera Relay is running", {
-        status: 200
-      });
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("WebSocket required", { status: 426 });
     }
 
     const url = new URL(request.url);
@@ -20,7 +18,8 @@ export class CameraRoom {
     }
 
     const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
+    const client = pair[0];
+    const server = pair[1];
 
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ role });
@@ -32,30 +31,30 @@ export class CameraRoom {
   }
 
   async webSocketMessage(ws, message) {
-    const attachment = ws.deserializeAttachment();
-    if (!attachment) return;
+    const info = ws.deserializeAttachment();
 
-    if (attachment.role === "camera") {
-      for (const peer of this.ctx.getWebSockets()) {
-        const info = peer.deserializeAttachment();
+    if (info?.role !== "camera") return;
 
-        if (info?.role === "viewer" &&
-            peer.readyState === WebSocket.OPEN) {
-          try {
-            peer.send(message);
-          } catch {}
+    for (const peer of this.ctx.getWebSockets()) {
+      const peerInfo = peer.deserializeAttachment();
+
+      if (
+        peerInfo?.role === "viewer" &&
+        peer.readyState === WebSocket.OPEN
+      ) {
+        try {
+          peer.send(message);
+        } catch (error) {
+          console.error("Viewer send failed");
         }
       }
     }
   }
 
-  async webSocketClose(ws, code, reason) {
-    if (code >= 1000 && code < 5000 &&
-        ![1004, 1005, 1006, 1015].includes(code)) {
-      ws.close(code, reason);
-    } else {
+  async webSocketClose(ws) {
+    try {
       ws.close();
-    }
+    } catch {}
   }
 }
 
@@ -64,15 +63,28 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
-      return new Response(
-        "ESP32 Camera Relay Server Online",
-        { headers: { "Content-Type": "text/plain" } }
-      );
+      return new Response("ESP32 Camera Relay Server Online");
     }
 
     if (url.pathname === "/ws") {
+      const role = url.searchParams.get("role");
+      const token = url.searchParams.get("token");
+
+      if (role === "camera" && token !== env.CAMERA_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      if (role === "viewer" && token !== env.VIEWER_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      if (!["camera", "viewer"].includes(role)) {
+        return new Response("Invalid role", { status: 400 });
+      }
+
       const id = env.CAMERA_ROOM.idFromName("main-camera");
       const room = env.CAMERA_ROOM.get(id);
+
       return room.fetch(request);
     }
 
