@@ -1,93 +1,89 @@
-
-export class CameraRoom {
-  constructor(ctx, env) {
-    this.ctx = ctx;
-    this.env = env;
-  }
-
-  async fetch(request) {
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response("WebSocket required", { status: 426 });
-    }
-
-    const url = new URL(request.url);
-    const role = url.searchParams.get("role");
-
-    if (!["camera", "viewer"].includes(role)) {
-      return new Response("Invalid role", { status: 400 });
-    }
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ role });
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client
-    });
-  }
-
-  async webSocketMessage(ws, message) {
-    const info = ws.deserializeAttachment();
-
-    if (info?.role !== "camera") return;
-
-    for (const peer of this.ctx.getWebSockets()) {
-      const peerInfo = peer.deserializeAttachment();
-
-      if (
-        peerInfo?.role === "viewer" &&
-        peer.readyState === WebSocket.OPEN
-      ) {
-        try {
-          peer.send(message);
-        } catch (error) {
-          console.error("Viewer send failed");
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>بث كاميرا ESP32</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
         }
-      }
-    }
-  }
+        #status {
+            margin-bottom: 15px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            background-color: #333;
+            font-size: 14px;
+        }
+        #stream {
+            max-width: 90%;
+            max-height: 75vh;
+            border: 2px solid #444;
+            border-radius: 8px;
+            background-color: #000;
+        }
+    </style>
+</head>
+<body>
 
-  async webSocketClose(ws) {
-    try {
-      ws.close();
-    } catch {}
-  }
-}
+    <div id="status">جاري الاتصال بالخادم...</div>
+    <img id="stream" alt="في انتظار البث..." />
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+    <script>
+        const wsUrl = "wss://esp32-camera-relay2.195178.workers.dev/ws?role=viewer";
+        const statusEl = document.getElementById("status");
+        const imgEl = document.getElementById("stream");
+        let lastUrl = null;
 
-    if (url.pathname === "/") {
-      return new Response("ESP32 Camera Relay Server Online");
-    }
+        function connect() {
+            const ws = new WebSocket(wsUrl);
+            ws.binaryType = "blob";
 
-    if (url.pathname === "/ws") {
-      const role = url.searchParams.get("role");
-      const token = url.searchParams.get("token");
+            ws.onopen = () => {
+                statusEl.textContent = "متصل - في انتظار الصور من الكاميرا";
+                statusEl.style.backgroundColor = "#1b5e20";
+            };
 
-      if (role === "camera" && token !== env.CAMERA_TOKEN) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+            ws.onmessage = (event) => {
+                if (event.data instanceof Blob) {
+                    statusEl.textContent = "بث مباشر نشط";
+                    const newUrl = URL.createObjectURL(event.data);
+                    imgEl.src = newUrl;
+                    
+                    if (lastUrl) {
+                        URL.revokeObjectURL(lastUrl);
+                    }
+                    lastUrl = newUrl;
+                } else if (typeof event.data === "string") {
+                    if (event.data.startsWith("data:image")) {
+                        imgEl.src = event.data;
+                    } else {
+                        console.log("رسالة نصية من الخادم:", event.data);
+                    }
+                }
+            };
 
-      if (role === "viewer" && token !== env.VIEWER_TOKEN) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+            ws.onclose = () => {
+                statusEl.textContent = "انقطع الاتصال. جاري إعادة المحاولة...";
+                statusEl.style.backgroundColor = "#b71c1c";
+                setTimeout(connect, 3000);
+            };
 
-      if (!["camera", "viewer"].includes(role)) {
-        return new Response("Invalid role", { status: 400 });
-      }
+            ws.onerror = (error) => {
+                console.error("خطأ في WebSocket:", error);
+                ws.close();
+            };
+        }
 
-      const id = env.CAMERA_ROOM.idFromName("main-camera");
-      const room = env.CAMERA_ROOM.get(id);
-
-      return room.fetch(request);
-    }
-
-    return new Response("Not Found", { status: 404 });
-  }
-};
+        connect();
+    </script>
+</body>
+</html>
