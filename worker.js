@@ -1,83 +1,4 @@
 
-const viewerPage = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 Camera Live</title>
-<style>
-body {
-  margin: 0;
-  background: #101010;
-  color: white;
-  font-family: Arial, sans-serif;
-  text-align: center;
-}
-h2 { margin: 20px 0; }
-#video {
-  width: 100%;
-  max-width: 900px;
-  height: auto;
-  background: #000;
-}
-#status {
-  padding: 15px;
-  color: #ffd166;
-}
-</style>
-</head>
-<body>
-<h2>ESP32 Camera Live</h2>
-<div id="status">Connecting...</div>
-<img id="video" alt="Camera stream">
-<script>
-const status = document.getElementById("status");
-const video = document.getElementById("video");
-
-let socket;
-let previousURL = null;
-
-function connect() {
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(
-    protocol + "//" + location.host + "/ws?role=viewer"
-  );
-
-  socket.binaryType = "blob";
-
-  socket.onopen = () => {
-    status.textContent = "Connected - Waiting for camera...";
-  };
-
-  socket.onmessage = (event) => {
-    const blob = new Blob([event.data], { type: "image/jpeg" });
-    const newURL = URL.createObjectURL(blob);
-
-    video.onload = () => {
-      if (previousURL) URL.revokeObjectURL(previousURL);
-      previousURL = newURL;
-    };
-
-    video.src = newURL;
-    status.textContent = "LIVE";
-  };
-
-  socket.onclose = () => {
-    status.textContent = "Disconnected - Reconnecting...";
-    setTimeout(connect, 2000);
-  };
-
-  socket.onerror = () => {
-    status.textContent = "Connection error";
-    socket.close();
-  };
-}
-
-connect();
-</script>
-</body>
-</html>`;
-
 export class CameraRoom {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -141,21 +62,17 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/") {
-      return new Response(viewerPage, {
-        headers: {
-          "Content-Type": "text/html; charset=UTF-8",
-          "Cache-Control": "no-store"
-        }
-      });
-    }
-
+    // CAMERA AND VIEWER CONNECTION
     if (url.pathname === "/ws") {
       const role = url.searchParams.get("role");
       const token = url.searchParams.get("token");
 
       if (role === "camera" && token !== env.CAMERA_TOKEN) {
-        return new Response("Unauthorized", { status: 401 });
+        return new Response("Camera Unauthorized", { status: 401 });
+      }
+
+      if (role === "viewer" && token !== env.VIEWER_TOKEN) {
+        return new Response("Viewer Unauthorized", { status: 401 });
       }
 
       if (!["camera", "viewer"].includes(role)) {
@@ -168,6 +85,13 @@ export default {
       return room.fetch(request);
     }
 
-    return new Response("Not Found", { status: 404 });
+    // SERVE index.html AND OTHER STATIC FILES
+    if (env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
+
+    return new Response("Assets binding not configured", {
+      status: 500
+    });
   }
 };
